@@ -1,4 +1,4 @@
-Personal learning project: Terraform infrastructure for an EKS-based medical triage pipeline on AWS.
+Personal learning project: Terraform infrastructure for an EKS-based SageMaker pipeline failure triage agent on AWS.
 
 ## Key commands
 - `terraform init` — initialise providers and backend

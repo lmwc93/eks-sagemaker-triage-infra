@@ -1,0 +1,42 @@
+# Terraform Apply — runs when code is merged to main
+# This is the only path that mutates real infrastructure.
+
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+
+# OIDC federation requires id-token:write.  contents:read for checkout.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout the main branch
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Install the Terraform CLI
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # 3. Authenticate to AWS using OIDC (no long-lived secrets needed)
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::208107893626:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      # 4. Initialise the backend (S3 state bucket)
+      - name: Terraform Init
+        run: terraform init
+
+      # 5. Apply changes without manual approval (already reviewed in PR)
+      - name: Terraform Apply
+        run: terraform apply -auto-approve

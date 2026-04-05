@@ -1,0 +1,104 @@
+# Terraform Plan — runs on every pull request
+# Posts the plan output as a collapsible comment on the PR so reviewers
+# can see exactly what will change before approving.
+
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches: [main]
+
+# OIDC federation requires id-token:write so GitHub can mint a short-lived
+# token that AWS STS trusts.  contents:read lets the job checkout code.
+# pull-requests:write lets us post/update the plan comment.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout the PR branch
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Install the Terraform CLI
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # 3. Authenticate to AWS using OIDC (no long-lived secrets needed)
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::208107893626:role/GitHubActionsRole
+          aws-region: ap-southeast-2
+
+      # 4. Initialise the backend (S3 state bucket)
+      - name: Terraform Init
+        run: terraform init
+
+      # 5. Syntax / provider validation
+      - name: Terraform Validate
+        run: terraform validate
+
+      # 6. Generate the execution plan and save it to a file
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out=plan.tfplan -no-color
+        continue-on-error: true
+
+      # 7. Post (or update) a PR comment with the plan output inside a
+      #    collapsible <details> block so it doesn't dominate the conversation.
+      - name: Comment plan on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `${{ steps.plan.outputs.stdout || '' }}`;
+            const outcome = '${{ steps.plan.outcome }}';
+            const body = `#### Terraform Plan \`${outcome}\`
+
+            <details><summary>Show plan output</summary>
+
+            \`\`\`terraform
+            ${output}
+            \`\`\`
+
+            </details>
+
+            *Triggered by @${{ github.actor }} in commit ${{ github.sha }}*`;
+
+            // Look for an existing plan comment to update (avoids spam)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = '#### Terraform Plan';
+            const existing = comments.find(c => c.body.startsWith(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      # 8. Fail the job if the plan itself failed (after we've posted the comment)
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

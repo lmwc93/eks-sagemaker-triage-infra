@@ -1,12 +1,26 @@
-# Terraform Plan — runs on every pull request
-# Posts the plan output as a collapsible comment on the PR so reviewers
-# can see exactly what will change before approving.
+# Terraform Plan — runs on every pull request targeting main
+#
+# HOW THIS WORKS:
+#   When a PR is opened (or updated) against main, this workflow runs
+#   `terraform plan` and posts the output as a collapsible comment on the PR.
+#   Reviewers can see exactly what infrastructure changes will happen before
+#   approving.
+#
+#   The plan comment is updated in place on subsequent pushes to the same PR,
+#   so the conversation doesn't get spammed with stale plans.
 
 name: Terraform Plan
 
 on:
   pull_request:
     branches: [main]
+
+# Prevent multiple plan runs from overlapping on the same PR. If a new commit
+# is pushed while a plan is still running, cancel the old one — only the
+# latest plan matters.
+concurrency:
+  group: terraform-plan-${{ github.head_ref }}
+  cancel-in-progress: true
 
 # OIDC federation requires id-token:write so GitHub can mint a short-lived
 # token that AWS STS trusts.  contents:read lets the job checkout code.
@@ -31,6 +45,8 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       # 3. Authenticate to AWS using OIDC (no long-lived secrets needed)
+      #    The GitHubActionsRole in AWS trusts tokens issued by GitHub for
+      #    this repo via an OIDC identity provider.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -45,7 +61,9 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-      # 6. Generate the execution plan and save it to a file
+      # 6. Generate the execution plan and save it to a file.
+      #    continue-on-error: true so we can still post the failure output
+      #    as a PR comment before marking the job as failed (step 8).
       - name: Terraform Plan
         id: plan
         run: terraform plan -out=plan.tfplan -no-color

@@ -31,12 +31,25 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
-output "subnet_ids" {
-  description = "IDs of the public subnets"
+output "public_subnet_ids" {
+  description = "IDs of the public subnets (hold NAT gateway and future load balancers)"
   value = [
     aws_subnet.public_a.id,
     aws_subnet.public_b.id,
   ]
+}
+
+output "private_subnet_ids" {
+  description = "IDs of the private subnets (hold EKS nodes)"
+  value = [
+    aws_subnet.private_a.id,
+    aws_subnet.private_b.id,
+  ]
+}
+
+output "nat_gateway_ip" {
+  description = "Public IP of the NAT Gateway (all outbound node traffic appears from this IP)"
+  value       = aws_eip.nat.public_ip
 }
 
 output "kubeconfig_update_command" {

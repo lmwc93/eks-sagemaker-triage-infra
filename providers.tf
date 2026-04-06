@@ -11,6 +11,12 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    # The tls provider is used to fetch the EKS OIDC issuer certificate
+    # so we can compute the thumbprint dynamically (see iam.tf).
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 

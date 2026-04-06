@@ -1,10 +1,32 @@
 # ---------------------------------------------------------------------------
-# networking.tf — VPC, subnets, routing, and security groups
+# networking.tf — VPC, subnets, NAT gateway, routing, and security groups
 # ---------------------------------------------------------------------------
-# Creates a minimal VPC with PUBLIC subnets only (no NAT gateway) to keep
-# costs at zero for this learning project.  EKS nodes sit in public subnets
-# and get public IPs so they can pull container images and reach the
-# Kubernetes API server.
+# Production-style networking with public and private subnets.
+#
+# TRAFFIC FLOW:
+#   Outbound from EKS nodes (private subnets):
+#     Node -> Private subnet route table -> NAT Gateway (in public subnet)
+#     -> Internet Gateway -> Internet
+#
+#   Inbound to EKS API (kubectl from local machine):
+#     Internet -> EKS managed public endpoint (not through our VPC)
+#
+#   Inbound to future load balancers:
+#     Internet -> Internet Gateway -> ALB (in public subnets)
+#     -> Target pods (in private subnets via VPC networking)
+#
+# WHY PRIVATE SUBNETS?
+#   Nodes in private subnets have no public IPs and cannot be reached
+#   directly from the internet. This is a security best practice — the
+#   only way in is through a load balancer or the EKS API endpoint.
+#   Nodes can still reach the internet (to pull images, etc.) via the
+#   NAT Gateway.
+#
+# COST NOTE:
+#   NAT Gateway costs ~$0.059/hr (~$43/month) in ap-southeast-2 plus
+#   $0.059/GB for data processed. This is the main ongoing cost of this
+#   networking setup. We use a single NAT GW (not one per AZ) to save
+#   money — production would use one per AZ for high availability.
 # ---------------------------------------------------------------------------
 
 # ---- VPC -----------------------------------------------------------------
@@ -19,30 +41,38 @@ resource "aws_vpc" "main" {
   }
 }
 
-# ---- Public subnets (one per AZ) ----------------------------------------
-# EKS requires subnets in at least 2 AZs.  We use /24 blocks which give
-# 251 usable IPs each — more than enough for a single-node cluster.
+# ---- Public subnets ------------------------------------------------------
+# These subnets have a route to the Internet Gateway, so resources here
+# can have public IPs and be reached from the internet.
+#
+# In our setup, public subnets hold ONLY:
+#   1. The NAT Gateway (so private subnets can reach the internet)
+#   2. Future load balancers (ALB/NLB for ingress traffic)
+#
+# EKS nodes do NOT live here — they go in the private subnets below.
 
 resource "aws_subnet" "public_a" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "ap-southeast-2a"
-  map_public_ip_on_launch = true
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "ap-southeast-2a"
+
+  # No map_public_ip_on_launch — we don't launch instances here.
+  # The NAT Gateway gets an Elastic IP explicitly, and load balancers
+  # manage their own public IPs.
 
   tags = {
     Name = "${var.project_name}-public-a"
-    # These tags tell the AWS Load Balancer Controller which subnets to use
-    # for internet-facing load balancers (not needed yet, but good practice).
+    # This tag tells the AWS Load Balancer Controller to place
+    # internet-facing load balancers in this subnet.
     "kubernetes.io/role/elb"                            = "1"
     "kubernetes.io/cluster/${var.project_name}-cluster" = "shared"
   }
 }
 
 resource "aws_subnet" "public_b" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = "ap-southeast-2b"
-  map_public_ip_on_launch = true
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "ap-southeast-2b"
 
   tags = {
     Name = "${var.project_name}-public-b"
@@ -51,8 +81,46 @@ resource "aws_subnet" "public_b" {
   }
 }
 
-# ---- Internet gateway ----------------------------------------------------
-# Allows outbound internet access from the public subnets.
+# ---- Private subnets -----------------------------------------------------
+# These subnets have NO direct internet access. Outbound traffic goes
+# through the NAT Gateway. Inbound traffic from the internet is impossible
+# unless routed through a load balancer in the public subnets.
+#
+# EKS worker nodes run here. They can still:
+#   - Pull container images from ECR (via NAT -> internet)
+#   - Reach the EKS API server (via private endpoint within the VPC)
+#   - Communicate with other AWS services (via NAT or VPC endpoints)
+
+resource "aws_subnet" "private_a" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.10.0/24"
+  availability_zone = "ap-southeast-2a"
+
+  tags = {
+    Name = "${var.project_name}-private-a"
+    # This tag tells the AWS Load Balancer Controller to place
+    # internal (non-internet-facing) load balancers in this subnet.
+    "kubernetes.io/role/internal-elb"                   = "1"
+    "kubernetes.io/cluster/${var.project_name}-cluster" = "shared"
+  }
+}
+
+resource "aws_subnet" "private_b" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.20.0/24"
+  availability_zone = "ap-southeast-2b"
+
+  tags = {
+    Name = "${var.project_name}-private-b"
+    "kubernetes.io/role/internal-elb"                   = "1"
+    "kubernetes.io/cluster/${var.project_name}-cluster" = "shared"
+  }
+}
+
+# ---- Internet Gateway ----------------------------------------------------
+# Allows resources in PUBLIC subnets to reach the internet.
+# The NAT Gateway sits in a public subnet and uses this to forward
+# traffic from private subnets outbound.
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
@@ -62,9 +130,44 @@ resource "aws_internet_gateway" "main" {
   }
 }
 
-# ---- Route table for public subnets -------------------------------------
-# A single route table shared by both public subnets with a default route
-# pointing to the internet gateway.
+# ---- NAT Gateway ---------------------------------------------------------
+# Sits in a PUBLIC subnet and forwards outbound traffic from private
+# subnets to the internet. Private subnet resources initiate connections
+# to the internet (e.g., pulling Docker images), and the NAT GW
+# translates their private IPs to its own Elastic IP.
+#
+# We only create ONE NAT Gateway (in AZ a) to save cost. If the AZ
+# goes down, nodes in AZ b lose internet access. Production would
+# create one NAT GW per AZ for high availability.
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.project_name}-nat-eip"
+  }
+
+  # The EIP needs the IGW to exist before it can be associated with
+  # a NAT Gateway that routes to the internet.
+  depends_on = [aws_internet_gateway.main]
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_a.id # NAT GW lives in a PUBLIC subnet
+
+  tags = {
+    Name = "${var.project_name}-nat-gw"
+  }
+
+  # NAT Gateway needs the IGW to route traffic to the internet.
+  depends_on = [aws_internet_gateway.main]
+}
+
+# ---- Route table for PUBLIC subnets --------------------------------------
+# Routes all non-local traffic (0.0.0.0/0) to the Internet Gateway.
+# This is what makes these subnets "public" — they can reach the internet
+# directly without NAT.
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
@@ -89,8 +192,39 @@ resource "aws_route_table_association" "public_b" {
   route_table_id = aws_route_table.public.id
 }
 
+# ---- Route table for PRIVATE subnets ------------------------------------
+# Routes all non-local traffic (0.0.0.0/0) to the NAT Gateway.
+# This is the key difference from public subnets: traffic goes through
+# NAT (which does the address translation) instead of directly to the IGW.
+#
+# Local traffic (10.0.0.0/16) is automatically routed within the VPC
+# by an implicit local route that AWS adds to every route table.
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-private-rt"
+  }
+}
+
+resource "aws_route_table_association" "private_a" {
+  subnet_id      = aws_subnet.private_a.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route_table_association" "private_b" {
+  subnet_id      = aws_subnet.private_b.id
+  route_table_id = aws_route_table.private.id
+}
+
 # ---- Security group for EKS cluster -------------------------------------
-# Controls traffic to the EKS control plane.  The managed node group gets
+# Controls traffic to the EKS control plane. The managed node group gets
 # its own security group automatically, but this one is explicitly attached
 # to the cluster so we can add custom rules later (e.g. restricting API
 # access to specific IPs).

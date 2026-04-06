@@ -17,12 +17,6 @@ variable "project_name" {
   default     = "eks-sagemaker-triage"
 }
 
-variable "account_id" {
-  description = "AWS account ID (used where data sources are not available)"
-  type        = string
-  default     = "208107893626"
-}
-
 variable "common_tags" {
   description = "Tags applied to every resource in addition to the provider default_tags"
   type        = map(string)

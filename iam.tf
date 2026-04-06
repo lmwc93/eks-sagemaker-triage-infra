@@ -94,10 +94,19 @@ resource "aws_iam_role_policy_attachment" "eks_ecr_read" {
 # via the EKS cluster's OIDC issuer.  The trust policy restricts assumption
 # to the "triage-agent" service account in the "default" namespace.
 
+# Fetch the TLS certificate from the EKS OIDC issuer so we can compute
+# the thumbprint dynamically. This avoids hardcoding a thumbprint that
+# could change when AWS rotates certificates.
+data "tls_certificate" "eks" {
+  url = aws_eks_cluster.main.identity[0].oidc[0].issuer
+}
+
 # The OIDC provider for the EKS cluster — enables IRSA.
+# The thumbprint is computed dynamically from the TLS certificate above
+# instead of being hardcoded.
 resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["9e99a48a9960b14926bb7f3b02e22da2b0ab7280"]
+  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
   url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
 
   tags = {

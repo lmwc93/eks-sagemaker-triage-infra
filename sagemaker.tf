@@ -14,7 +14,9 @@
 
 resource "aws_sagemaker_pipeline" "dummy_fail" {
   pipeline_name         = "${var.project_name}-dummy-fail"
-  pipeline_display_name = "Dummy Fail Pipeline (Testing)"
+  # Display name must only contain a-z, A-Z, 0-9, and hyphens.
+  # Spaces and parentheses are not allowed.
+  pipeline_display_name = "dummy-fail-pipeline-testing"
   role_arn              = aws_iam_role.sagemaker_pipeline.arn
 
   # The pipeline definition is a JSON document following the SageMaker

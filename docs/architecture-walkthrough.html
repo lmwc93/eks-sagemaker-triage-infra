@@ -692,8 +692,8 @@
       </div>
       <div class="ve-card border-accent">
         <div class="ve-card__label" style="color: var(--accent)">providers.tf</div>
-        <h3>AWS Provider</h3>
-        <p>Pins AWS provider to <code>~> 5.0</code>. Sets <code>default_tags</code> so every resource inherits <code>Project</code> and <code>ManagedBy</code> tags. Defines data sources: <code>aws_caller_identity</code>, <code>aws_region</code>, <code>aws_availability_zones</code>.</p>
+        <h3>AWS + TLS Providers</h3>
+        <p>Pins AWS provider to <code>~> 5.0</code> and TLS to <code>~> 4.0</code> (for OIDC thumbprint lookup). Sets <code>default_tags</code> so every resource inherits <code>Project</code> and <code>ManagedBy</code> tags. Defines data sources: <code>aws_caller_identity</code>, <code>aws_region</code>, <code>aws_availability_zones</code>.</p>
       </div>
       <div class="ve-card border-accent">
         <div class="ve-card__label" style="color: var(--accent)">variables.tf</div>
@@ -710,7 +710,7 @@
     <div id="s4" class="sec-head sec-head--teal animate" style="--i:14"><span class="sec-num">4</span> Networking</div>
 
     <div class="prose animate" style="--i:15">
-      <p>The VPC is your private network within AWS. Everything runs in <strong>public subnets only</strong> &mdash; no NAT gateway &mdash; saving ~$32/month. Nodes get public IPs and access the internet directly through an internet gateway.</p>
+      <p>The VPC is your private network within AWS. Following production best practices, EKS nodes run in <strong>private subnets</strong> (no public IPs, unreachable from the internet). A <strong>NAT Gateway</strong> in a public subnet provides one-way outbound internet access &mdash; nodes can pull images and call APIs, but nothing can reach them from outside.</p>
     </div>
 
     <section class="diagram-shell animate" style="--i:16">
@@ -731,31 +731,35 @@
       <script type="text/plain" class="diagram-source">
         graph TD
           INET["Internet"] --> IGW["Internet Gateway"]
-          IGW --> RT["Route Table<br/>0.0.0.0/0 -> IGW"]
-          RT --> SUBA["Public Subnet A<br/>10.0.1.0/24<br/>ap-southeast-2a"]
-          RT --> SUBB["Public Subnet B<br/>10.0.2.0/24<br/>ap-southeast-2b"]
+          IGW --> PUB_RT["Public Route Table<br/>0.0.0.0/0 -> IGW"]
+          PUB_RT --> SUBA["Public Subnet A<br/>10.0.1.0/24"]
+          PUB_RT --> SUBB["Public Subnet B<br/>10.0.2.0/24"]
           subgraph VPC["VPC 10.0.0.0/16"]
-            SUBA
+            SUBA --> NAT["NAT Gateway + EIP"]
+            NAT --> PRIV_RT["Private Route Table<br/>0.0.0.0/0 -> NAT"]
+            PRIV_RT --> PRIVA["Private Subnet A<br/>10.0.10.0/24"]
+            PRIV_RT --> PRIVB["Private Subnet B<br/>10.0.20.0/24"]
             SUBB
-            SG["Security Group<br/>EKS Cluster"]
           end
-          SUBA --> EKSNODE["EKS Node"]
-          SG -.->|"controls traffic to"| EKSNODE
+          PRIVA --> EKSNODE["EKS Node"]
 
-          classDef vpc fill:#0d948822,stroke:#0d9488,stroke-width:2px
-          classDef subnet fill:#0369a122,stroke:#0369a1,stroke-width:1.5px
-          class SUBA,SUBB subnet
+          classDef pub fill:#0369a122,stroke:#0369a1,stroke-width:1.5px
+          classDef priv fill:#0d948822,stroke:#0d9488,stroke-width:1.5px
+          classDef nat fill:#b4530922,stroke:#b45309,stroke-width:2px
+          class SUBA,SUBB pub
+          class PRIVA,PRIVB priv
+          class NAT nat
       </script>
     </section>
 
     <div class="grid-2 animate" style="--i:17">
       <div class="ve-card border-teal">
-        <div class="ve-card__label" style="color: var(--teal)">Why public subnets?</div>
-        <p>A NAT gateway costs ~$32/month + data processing. In production, nodes sit in <strong>private subnets</strong> (no public IPs) and use NAT for outbound internet. For a learning project, public subnets are fine &mdash; the security trade-off is acceptable and saves real money.</p>
+        <div class="ve-card__label" style="color: var(--teal)">Public vs Private Subnets</div>
+        <p><strong>Public subnets</strong> have a route to the Internet Gateway &mdash; resources get public IPs. They hold the NAT Gateway and future load balancers. <strong>Private subnets</strong> have no internet route &mdash; resources are unreachable from outside. Their route table points <code>0.0.0.0/0</code> through the NAT Gateway, giving outbound-only access. EKS nodes live here.</p>
       </div>
       <div class="ve-card border-teal">
-        <div class="ve-card__label" style="color: var(--teal)">Why two AZs?</div>
-        <p>EKS requires subnets in at least 2 availability zones for high availability. Each AZ is a separate physical data centre. Even though we only run one node, EKS enforces this constraint. The <code>kubernetes.io/role/elb</code> tags are for future load balancer support.</p>
+        <div class="ve-card__label" style="color: var(--teal)">NAT Gateway</div>
+        <p>A one-way door: nodes can reach the internet (pull images, call AWS APIs) but nothing can reach them from outside. Costs ~$32/month + $0.045/GB data. We use <strong>one NAT Gateway</strong> in a single AZ (production would use one per AZ for HA). The Elastic IP gives it a stable public address. Tags: public subnets get <code>kubernetes.io/role/elb</code>, private get <code>kubernetes.io/role/internal-elb</code>.</p>
       </div>
     </div>
 
@@ -763,7 +767,7 @@
     <div id="s5" class="sec-head sec-head--accent animate" style="--i:18"><span class="sec-num">5</span> EKS Cluster</div>
 
     <div class="prose animate" style="--i:19">
-      <p>EKS has two distinct parts that cost differently. The <strong>control plane</strong> (API server, etcd, scheduler) is a managed service AWS runs outside your VPC &mdash; $0.10/hr. The <strong>node group</strong> is the EC2 instance where pods actually run &mdash; $0.026/hr for t3.small.</p>
+      <p>EKS has two distinct parts that cost differently. The <strong>control plane</strong> (API server, etcd, scheduler) is a managed service AWS runs outside your VPC &mdash; $0.10/hr. The <strong>node group</strong> is the EC2 instance where pods actually run &mdash; using <strong>Spot instances</strong> at ~60-70% discount. Nodes run in private subnets with both public and private API endpoints enabled.</p>
     </div>
 
     <div class="grid-2 animate" style="--i:20">
@@ -773,27 +777,28 @@
         <p>Kubernetes API server, etcd, scheduler, controller manager. Lives <em>outside</em> your VPC. You just get an API endpoint.</p>
         <ul>
           <li>Cost: <strong>~$0.10/hr ($73/month)</strong></li>
-          <li>Public endpoint for <code>kubectl</code> from local</li>
-          <li>Logging: audit + api to CloudWatch</li>
+          <li><strong>Public endpoint</strong> enabled &mdash; for <code>kubectl</code> from your local machine</li>
+          <li><strong>Private endpoint</strong> enabled &mdash; so nodes in private subnets reach the API server internally (without going through NAT)</li>
+          <li>Control plane logging disabled (saves on CloudWatch ingestion costs)</li>
           <li><code>depends_on</code> ensures IAM role exists before cluster creation</li>
         </ul>
       </div>
       <div class="ve-card border-accent">
         <div class="ve-card__label" style="color: var(--accent)">Managed Node Group</div>
         <h3>Your compute</h3>
-        <p>EC2 instances where pods run. "Managed" means AWS handles provisioning, updates, and draining.</p>
+        <p>EC2 instances where pods run. "Managed" means AWS handles provisioning, updates, and draining. Nodes run in <strong>private subnets</strong>.</p>
         <ul>
           <li>Single <strong>t3.small</strong>: 2 vCPU, 2 GiB RAM</li>
-          <li>Cost: <strong>~$0.026/hr ($19/month)</strong></li>
+          <li><strong>Spot instances</strong> &mdash; ~60-70% cheaper (~$0.008/hr vs $0.026/hr)</li>
           <li>Scaling: min=1, max=1, desired=1 (no autoscaling surprises)</li>
-          <li>ON_DEMAND (not Spot &mdash; simpler, no interruptions)</li>
+          <li>Spot is ideal here &mdash; the cluster is torn down frequently anyway, so interruptions don't matter</li>
           <li>20 GiB root volume</li>
         </ul>
       </div>
     </div>
 
     <div class="callout callout--rose animate" style="--i:21">
-      <strong>Cost warning.</strong> The EKS control plane alone costs $73/month. Combined with the node, you're looking at ~$92/month if left running. This is why <code>terraform destroy</code> when done is critical &mdash; and why we set up the auto-destroy hook.
+      <strong>Cost warning.</strong> The EKS control plane alone costs $73/month. With the NAT Gateway (~$32/month) and Spot node (~$6/month), you're looking at ~$111/month if left running. This is why <code>/teardown</code> when done is critical.
     </div>
 
     <!-- ===== SECTION 6: ECR ===== -->
@@ -939,7 +944,7 @@
     <div id="s9" class="sec-head sec-head--accent animate" style="--i:33"><span class="sec-num">9</span> CI/CD Pipeline</div>
 
     <div class="prose animate" style="--i:34">
-      <p>Two GitHub Actions workflows enforce the principle: <strong>no infrastructure changes without code review</strong>. PRs get a plan, merges get an apply. Authentication uses OIDC &mdash; no stored AWS keys.</p>
+      <p>Two GitHub Actions workflows enforce the principle: <strong>no infrastructure changes without code review</strong>. PRs get a plan, merges get an apply. Direct pushes to main are blocked by <strong>branch protection</strong>, and the apply workflow has a safeguard that skips non-merge commits. Authentication uses OIDC &mdash; no stored AWS keys.</p>
     </div>
 
     <section class="diagram-shell animate" style="--i:35">
@@ -1002,12 +1007,12 @@
       <div class="ve-card border-emerald">
         <div class="ve-card__label" style="color: var(--emerald)">SessionStart Hook</div>
         <h3>Reminder</h3>
-        <p>Prints a warning on every session start: "exit with <code>/exit</code>, not the red circle." Fires on all sessions in this project.</p>
+        <p>Prints a warning on every session start: "Run <code>/teardown</code> before leaving to destroy infrastructure and stop billing." Fires on all sessions in this project.</p>
       </div>
       <div class="ve-card ve-card--hero border-emerald">
-        <div class="ve-card__label" style="color: var(--emerald)">SessionEnd Hook</div>
-        <h3>Auto Destroy</h3>
-        <p>Runs <code>terraform destroy -auto-approve</code> when you type <code>/exit</code>. Matcher: <code>"logout"</code> only &mdash; does NOT fire on <code>/clear</code> or other exits. Logs to <code>/tmp/terraform-destroy.log</code>.</p>
+        <div class="ve-card__label" style="color: var(--emerald)">/teardown Command</div>
+        <h3>Explicit Destroy</h3>
+        <p>Custom slash command that runs <code>terraform destroy -auto-approve</code>. Run it manually before leaving a session. Replaced the SessionEnd hook, which <a href="https://github.com/anthropics/claude-code/issues/35892" style="color:var(--accent)">doesn't fire on /exit</a> (known limitation).</p>
       </div>
       <div class="ve-card border-emerald">
         <div class="ve-card__label" style="color: var(--emerald)">Context7 MCP</div>
@@ -1017,7 +1022,7 @@
     </div>
 
     <div class="callout callout--amber animate" style="--i:40">
-      <strong>Caveat.</strong> The SessionEnd hook only fires on graceful exits. If you force-quit the terminal (Cmd+Q, kill -9, laptop dies), the hook won't run and your cluster stays up accruing cost. The CloudWatch alarms at $20 and $30 are your backstop.
+      <strong>Why not automatic?</strong> Claude Code's <code>SessionEnd</code> hook doesn't fire when you type <code>/exit</code> &mdash; the process terminates immediately. So teardown must be explicit. The CloudWatch alarms at $20 and $30 are your backstop if you forget.
     </div>
 
     <!-- ===== SECTION 11: END-TO-END FLOW ===== -->
@@ -1072,7 +1077,7 @@
     <div id="s12" class="sec-head sec-head--rose animate" style="--i:44"><span class="sec-num">12</span> Cost Summary</div>
 
     <div class="prose animate" style="--i:45">
-      <p>The critical insight: most costs only accrue when the cluster is <strong>running</strong>. Tearing down with <code>terraform destroy</code> eliminates the expensive resources. The table below shows estimated monthly costs.</p>
+      <p>The critical insight: most costs only accrue when the cluster is <strong>running</strong>. Tearing down with <code>/teardown</code> eliminates the expensive resources. The NAT Gateway is the second biggest cost after the control plane.</p>
     </div>
 
     <div class="table-wrap animate" style="--i:46">
@@ -1094,16 +1099,22 @@
               <td>$0.10/hr, biggest fixed cost</td>
             </tr>
             <tr>
-              <td>EC2 Node (t3.small)</td>
-              <td class="cost">$19.00</td>
+              <td>NAT Gateway</td>
+              <td class="cost"><strong>$32.00</strong></td>
               <td class="cost">$0.00</td>
-              <td>$0.026/hr, on-demand</td>
+              <td>$0.045/hr + $0.045/GB data processed</td>
             </tr>
             <tr>
-              <td>CloudWatch Logs</td>
-              <td class="cost">~$2.00</td>
+              <td>EC2 Node (t3.small Spot)</td>
+              <td class="cost">~$6.00</td>
               <td class="cost">$0.00</td>
-              <td>Control plane audit + api logs</td>
+              <td>~$0.008/hr, ~70% cheaper than on-demand</td>
+            </tr>
+            <tr>
+              <td>Elastic IP (NAT)</td>
+              <td class="cost">$3.60</td>
+              <td class="cost">$0.00</td>
+              <td>$0.005/hr, required for NAT Gateway</td>
             </tr>
             <tr>
               <td>ECR Storage</td>
@@ -1131,9 +1142,9 @@
             </tr>
             <tr style="font-weight: 600;">
               <td>Total (estimated)</td>
-              <td class="cost" style="color: var(--rose);"><strong>~$94/month</strong></td>
+              <td class="cost" style="color: var(--rose);"><strong>~$115/month</strong></td>
               <td class="cost" style="color: var(--emerald);"><strong>~$0.01/month</strong></td>
-              <td>Destroy when not using!</td>
+              <td>Run /teardown when done!</td>
             </tr>
           </tbody>
         </table>
@@ -1141,7 +1152,7 @@
     </div>
 
     <div class="callout callout--rose animate" style="--i:47">
-      <strong>Key takeaway.</strong> At ~$3/day when running, remember to <code>terraform destroy</code> after each session. The auto-destroy hook on <code>/exit</code> handles this, but the CloudWatch alarms at $20 and $30 are your safety net if anything slips through.
+      <strong>Key takeaway.</strong> At ~$3.80/day when running, run <code>/teardown</code> before ending each session. The NAT Gateway adds ~$1/day compared to public-only subnets, but gives you production-grade network isolation. CloudWatch alarms at $20 and $30 are your safety net.
     </div>
 
     <!-- ===== FILE TREE ===== -->
@@ -1161,7 +1172,9 @@
 ├── CLAUDE.md             <span class="ann">— Project context for Claude Code</span>
 ├── .gitignore            <span class="ann">— Terraform patterns</span>
 ├── .claude/
-│   └── <span class="hl">settings.json</span>   <span class="ann">— Hooks + Context7 MCP</span>
+│   ├── <span class="hl">settings.json</span>   <span class="ann">— SessionStart hook + Context7 MCP</span>
+│   └── commands/
+│       └── <span class="hl">teardown.md</span> <span class="ann">— /teardown slash command</span>
 └── .github/
     └── workflows/
         ├── <span class="hl">terraform-plan.yml</span>   <span class="ann">— Plan on PR</span>

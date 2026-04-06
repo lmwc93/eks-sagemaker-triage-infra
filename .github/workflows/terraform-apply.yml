@@ -1,11 +1,37 @@
-# Terraform Apply — runs when code is merged to main
-# This is the only path that mutates real infrastructure.
+# Terraform Apply — runs when a PR is merged to main
+#
+# HOW THIS WORKS:
+#   Trigger: `push: branches: [main]` fires whenever main receives new commits.
+#   Merging a PR creates a push event to main, so this naturally covers the
+#   "PR merged" case.
+#
+# PREVENTING ACCIDENTAL DIRECT-PUSH APPLIES:
+#   We do NOT want `terraform apply` to run if someone pushes directly to main
+#   (e.g. a quick typo fix without a PR). Two safeguards are in place:
+#
+#   1. Branch protection on main requires pull requests before merging.
+#      This is the primary gate — direct pushes are blocked at the Git level.
+#      (Set up via GitHub repo settings or `gh api`.)
+#
+#   2. A job-level `if` condition below checks that the commit message looks
+#      like a merge commit ("Merge pull request"). This is a lightweight
+#      backup — not bulletproof (someone could craft a commit message), but
+#      it catches honest mistakes if branch protection is ever loosened.
+#
+# This is the ONLY workflow that mutates real infrastructure.
 
 name: Terraform Apply
 
 on:
   push:
     branches: [main]
+
+# Prevent multiple apply runs from overlapping. If a second merge lands while
+# the first is still running, the second run will wait (not cancel the first),
+# because we never want to interrupt an in-progress apply.
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
 
 # OIDC federation requires id-token:write.  contents:read for checkout.
 permissions:
@@ -17,6 +43,10 @@ jobs:
     name: Apply
     runs-on: ubuntu-latest
 
+    # Safety check: only run if this push came from a PR merge.
+    # GitHub's default merge commit message starts with "Merge pull request".
+    if: contains(github.event.head_commit.message, 'Merge pull request')
+
     steps:
       # 1. Checkout the main branch
       - name: Checkout code
@@ -27,6 +57,8 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       # 3. Authenticate to AWS using OIDC (no long-lived secrets needed)
+      #    The GitHubActionsRole in AWS trusts tokens issued by GitHub for
+      #    this repo via an OIDC identity provider.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

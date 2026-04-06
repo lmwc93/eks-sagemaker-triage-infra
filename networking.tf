@@ -54,7 +54,7 @@ resource "aws_vpc" "main" {
 resource "aws_subnet" "public_a" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.1.0/24"
-  availability_zone = "ap-southeast-2a"
+  availability_zone = data.aws_availability_zones.available.names[0]
 
   # No map_public_ip_on_launch — we don't launch instances here.
   # The NAT Gateway gets an Elastic IP explicitly, and load balancers
@@ -72,7 +72,7 @@ resource "aws_subnet" "public_a" {
 resource "aws_subnet" "public_b" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.2.0/24"
-  availability_zone = "ap-southeast-2b"
+  availability_zone = data.aws_availability_zones.available.names[1]
 
   tags = {
     Name = "${var.project_name}-public-b"
@@ -94,7 +94,7 @@ resource "aws_subnet" "public_b" {
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.10.0/24"
-  availability_zone = "ap-southeast-2a"
+  availability_zone = data.aws_availability_zones.available.names[0]
 
   tags = {
     Name = "${var.project_name}-private-a"
@@ -108,7 +108,7 @@ resource "aws_subnet" "private_a" {
 resource "aws_subnet" "private_b" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.20.0/24"
-  availability_zone = "ap-southeast-2b"
+  availability_zone = data.aws_availability_zones.available.names[1]
 
   tags = {
     Name = "${var.project_name}-private-b"

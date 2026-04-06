@@ -47,8 +47,9 @@ resource "aws_eks_cluster" "main" {
     endpoint_private_access = true
   }
 
-  # CloudWatch control-plane logs are disabled to save on costs.
-  # Re-enable ["audit", "api"] if you need to debug cluster-level issues.
+  # Enable audit and API control-plane logs for security visibility.
+  # These capture who accessed the cluster API and what they did.
+  enabled_cluster_log_types = ["audit", "api"]
 
   tags = {
     Name = "${var.project_name}-cluster"
@@ -90,8 +91,9 @@ resource "aws_eks_node_group" "main" {
   # t3.small: 2 vCPU, 2 GiB RAM — tight but workable for a single agent pod.
   instance_types = ["t3.small"]
 
-  # Use the latest Amazon Linux 2 EKS-optimised AMI (default).
-  ami_type = "AL2_x86_64"
+  # Amazon Linux 2023 — AWS's current recommended EKS-optimised AMI.
+  # AL2 is approaching EOL; AL2023 receives ongoing security updates.
+  ami_type = "AL2023_x86_64_STANDARD"
 
   # SPOT instances save ~60-70% over on-demand. The trade-off is that AWS
   # can reclaim the instance with 2 minutes notice. This is acceptable for

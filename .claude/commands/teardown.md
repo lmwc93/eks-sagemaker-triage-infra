@@ -1,0 +1,1 @@
+Run `terraform destroy -auto-approve` to tear down all infrastructure in this project. Show the user the output so they can confirm resources are being destroyed. After completion, summarise what was destroyed and confirm the cluster is down.

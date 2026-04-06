@@ -6,18 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo \"⚠️  REMINDER: When you're done, exit with /exit (not the red circle) so terraform destroy runs automatically.\""
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "logout",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && terraform destroy -auto-approve 2>&1 | tee /tmp/terraform-destroy.log"
+            "command": "echo \"⚠️  REMINDER: Run /teardown before leaving to destroy infrastructure and stop billing.\""
           }
         ]
       }
